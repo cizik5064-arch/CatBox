@@ -6,26 +6,84 @@ const https = require('https');
 const http = require('http');
 const { parseChannels } = require('./lib/channels');
 
+// === Load .env (no external dependency) ===
+function loadEnvFile() {
+  const envPath = path.join(__dirname, '.env');
+  if (!fs.existsSync(envPath)) return;
+  try {
+    const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      let val = trimmed.slice(eq + 1).trim();
+      // strip optional quotes
+      if (
+        (val.startsWith('"') && val.endsWith('"')) ||
+        (val.startsWith("'") && val.endsWith("'"))
+      ) {
+        val = val.slice(1, -1);
+      }
+      if (key && process.env[key] === undefined) {
+        process.env[key] = val;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load .env:', e.message);
+  }
+}
+loadEnvFile();
+
 let mainWindow = null;
 let channels = [];
 let currentChannelIndex = 0;
 
-// === NTFY critical error reporting ===
+/**
+ * Critical error → ntfy (topic from env, never hardcoded).
+ * NTFY_TOPIC — only the topic name, e.g. my-secret-topic
+ * or NTFY_URL — full URL https://ntfy.sh/my-secret-topic
+ * If neither is set, notifications are skipped.
+ */
 function notifyCritical(title, message) {
+  const topicRaw = (process.env.NTFY_TOPIC || '').trim();
+  const urlRaw = (process.env.NTFY_URL || '').trim();
+
+  let hostname = 'ntfy.sh';
+  let topicPath = '';
+
+  if (urlRaw) {
+    try {
+      const u = new URL(urlRaw);
+      hostname = u.hostname;
+      topicPath = u.pathname; // includes leading /
+      if (!topicPath || topicPath === '/') return;
+    } catch {
+      return;
+    }
+  } else if (topicRaw) {
+    // allow "topic" or "/topic"
+    topicPath = topicRaw.startsWith('/') ? topicRaw : '/' + topicRaw;
+  } else {
+    // not configured — silent skip
+    return;
+  }
+
   const body = `${title}\n\n${message}\n\nTime: ${new Date().toISOString()}`;
   const req = https.request(
     {
-      hostname: 'ntfy.sh',
-      path: '/tvssboxxeedbydontart',
+      hostname,
+      path: topicPath,
       method: 'POST',
       headers: {
-        'Title': 'CatBox Critical',
-        'Priority': 'high',
-        'Tags': 'warning,tv',
+        Title: 'CatBox Critical',
+        Priority: 'high',
+        Tags: 'warning,tv',
         'Content-Type': 'text/plain',
       },
     },
-    (res) => {
+    () => {
       // ignore response
     }
   );
