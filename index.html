@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CatBox</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- START SCREEN -->
+  <div id="start-screen" class="screen active">
+    <div class="bg-landscape"></div>
+    <div class="start-content">
+      <h1 class="logo">CatBox</h1>
+      <button id="btn-watch" class="btn-watch">Смотреть ТВ</button>
+      <p class="credit">CatBox by dontart</p>
+    </div>
+  </div>
+
+  <!-- PLAYER SCREEN -->
+  <div id="player-screen" class="screen">
+    <video id="video" playsinline autoplay></video>
+
+    <!-- Error overlay -->
+    <div id="error-overlay" class="error-overlay hidden">
+      <div class="error-box">
+        <div class="error-icon">⚠</div>
+        <div id="error-text">Ошибка воспроизведения</div>
+      </div>
+    </div>
+
+    <!-- Channel list (slides from left) -->
+    <div id="channel-list" class="channel-list">
+      <div class="channel-list-inner" id="channel-list-inner"></div>
+    </div>
+
+    <!-- Number input overlay (top-right) -->
+    <div id="number-input" class="number-input hidden">
+      <span id="number-digits"></span>
+    </div>
+
+    <!-- Channel info (brief) -->
+    <div id="channel-info" class="channel-info hidden">
+      <span id="info-number"></span>
+      <span id="info-name"></span>
+    </div>
+  </div>
+
+  <script src="node_modules/hls.js/dist/hls.min.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
