@@ -6,6 +6,10 @@ contextBridge.exposeInMainWorld('catbox', {
   onChannelsLoaded: (callback) => {
     ipcRenderer.on('channels-loaded', (event, channels) => callback(channels));
   },
+  onGlobalKey: (callback) => {
+    ipcRenderer.on('global-key', (event, payload) => callback(payload));
+  },
   criticalError: (title, message) => ipcRenderer.send('critical-error', title, message),
   quit: () => ipcRenderer.send('quit-app'),
+  requestFocus: () => ipcRenderer.send('request-focus'),
 });
