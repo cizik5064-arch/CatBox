@@ -11,6 +11,7 @@
   let infoHideTimer = null;
   let mouseTimer = null;
   let isResolving = false;
+  let pendingIndex = null; // queue next channel while resolve is in flight
 
   // ========== DOM ==========
   const startScreen = document.getElementById('start-screen');
@@ -70,11 +71,9 @@
         if (data.fatal) {
           console.error('HLS fatal error', data);
           showError('Не удалось воспроизвести поток');
-          // Not sending to ntfy — ordinary stream problem
         }
       });
     } else if (video.canPlayType('application/vnd.apple.mpegurl') || !isHls) {
-      // Safari / native HLS or progressive
       video.src = url;
       video.play().catch(() => {
         showError('Не удалось начать воспроизведение');
@@ -85,45 +84,66 @@
   }
 
   async function switchToIndex(index, showList = true) {
-    if (!channels.length || isResolving) return;
+    if (!channels.length) return;
     if (index < 0) index = channels.length - 1;
     if (index >= channels.length) index = 0;
 
-    currentIndex = index;
-    const ch = channels[currentIndex];
-
-    // Update list highlight
-    renderChannelList();
-    if (showList) {
-      showChannelList();
+    if (isResolving) {
+      pendingIndex = index;
+      currentIndex = index;
+      renderChannelList();
+      if (showList) showChannelList();
+      showChannelInfo(channels[currentIndex]);
+      return;
     }
 
-    // Brief info
+    currentIndex = index;
+    pendingIndex = null;
+    const ch = channels[currentIndex];
+
+    renderChannelList();
+    if (showList) showChannelList();
     showChannelInfo(ch);
 
-    // Resolve & play
     isResolving = true;
     hideError();
 
     try {
       const result = await window.catbox.resolveStream(ch.id);
-      if (result.error) {
-        showError(result.error.includes('yt-dlp') || result.error.includes('youtube-dl')
-          ? 'Не удалось получить поток (yt-dlp)'
-          : 'Поток недоступен');
+      if (pendingIndex !== null && pendingIndex !== currentIndex) {
+        const next = pendingIndex;
+        pendingIndex = null;
         isResolving = false;
+        await switchToIndex(next, showList);
+        return;
+      }
+      if (result.error) {
+        const raw = String(result.error || '');
+        const isYtdlp =
+          raw.toLowerCase().includes('yt-dlp') ||
+          raw.toLowerCase().includes('youtube-dl') ||
+          ch.source === 'ytdlp';
+        showError(
+          isYtdlp
+            ? 'Не удалось получить поток (yt-dlp). Проверь установку yt-dlp и ссылку.'
+            : 'Поток недоступен'
+        );
         return;
       }
       playUrl(result.url);
     } catch (e) {
       console.error(e);
       showError('Ошибка переключения канала');
-      // Only real unexpected errors go to ntfy
       if (window.catbox && window.catbox.criticalError) {
         window.catbox.criticalError('Switch Error', e.stack || e.message);
       }
     } finally {
       isResolving = false;
+      if (pendingIndex !== null) {
+        const next = pendingIndex;
+        pendingIndex = null;
+        switchToIndex(next, showList);
+      }
     }
   }
 
@@ -136,7 +156,6 @@
       channelListInner.appendChild(item);
     });
 
-    // Scroll active into view
     const active = channelListInner.querySelector('.ch-item.active');
     if (active) {
       active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
@@ -145,10 +164,10 @@
 
   function escapeHtml(str) {
     return String(str)
-      .replace(/&/g, '&')
-      .replace(/</g, '<')
-      .replace(/>/g, '>')
-      .replace(/"/g, '"');
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
   }
 
   function showChannelList() {
@@ -169,7 +188,6 @@
     }, 2500);
   }
 
-  // ========== Number input ==========
   function onDigit(d) {
     numberBuffer += d;
     numberDigits.textContent = numberBuffer;
@@ -186,47 +204,56 @@
         if (idx !== -1) {
           switchToIndex(idx, true);
         }
-        // if not found — just disappear, as requested
       }
     }, 3000);
   }
 
-  // ========== Keyboard ==========
-  function onKeyDown(e) {
-    // Ignore if on start screen
+  function handleKey(key) {
+    if (window.catbox && window.catbox.requestFocus) {
+      window.catbox.requestFocus();
+    }
+
     if (startScreen.classList.contains('active')) {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
+      if (key === 'Enter' || key === ' ') {
         startPlayer();
       }
       return;
     }
 
-    switch (e.key) {
+    switch (key) {
       case 'ArrowUp':
-        e.preventDefault();
         switchToIndex(currentIndex - 1, true);
         break;
       case 'ArrowDown':
-        e.preventDefault();
         switchToIndex(currentIndex + 1, true);
         break;
       case 'Escape':
-        e.preventDefault();
-        // Optional: return to start or quit
-        // For now just quit on long press? Simple: quit
         if (window.catbox) window.catbox.quit();
         break;
       default:
-        if (/^[0-9]$/.test(e.key)) {
-          e.preventDefault();
-          onDigit(e.key);
+        if (/^[0-9]$/.test(key)) {
+          onDigit(key);
         }
         break;
     }
   }
 
-  // ========== Mouse cursor auto-hide ==========
+  function onKeyDown(e) {
+    const key = e.key;
+    if (
+      key === 'ArrowUp' ||
+      key === 'ArrowDown' ||
+      key === 'Escape' ||
+      key === 'Enter' ||
+      key === ' ' ||
+      /^[0-9]$/.test(key)
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+    handleKey(key);
+  }
+
   function onMouseMove() {
     document.body.classList.add('mouse-active');
     clearTimeout(mouseTimer);
@@ -235,7 +262,6 @@
     }, 2500);
   }
 
-  // ========== Start player ==========
   function startPlayer() {
     startScreen.classList.remove('active');
     playerScreen.classList.add('active');
@@ -245,13 +271,10 @@
       return;
     }
 
-    // Auto-play first channel
     switchToIndex(0, false);
   }
 
-  // ========== Init ==========
   async function init() {
-    // Load channels
     try {
       if (window.catbox) {
         channels = await window.catbox.getChannels();
@@ -264,20 +287,36 @@
     }
 
     btnWatch.addEventListener('click', startPlayer);
-    document.addEventListener('keydown', onKeyDown);
+    document.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keydown', onKeyDown, true);
     document.addEventListener('mousemove', onMouseMove);
 
-    // Video error handler (ordinary, not critical)
+    if (window.catbox && window.catbox.onGlobalKey) {
+      window.catbox.onGlobalKey((payload) => {
+        if (payload && payload.key) handleKey(payload.key);
+      });
+    }
+
+    document.addEventListener(
+      'mousedown',
+      () => {
+        if (window.catbox && window.catbox.requestFocus) window.catbox.requestFocus();
+      },
+      true
+    );
+
     video.addEventListener('error', () => {
       if (video.error) {
         showError('Ошибка видео');
       }
     });
 
-    // Global error → ntfy only for unexpected
     window.addEventListener('error', (ev) => {
       if (window.catbox) {
-        window.catbox.criticalError('Renderer Error', ev.message + '\n' + (ev.filename || '') + ':' + (ev.lineno || ''));
+        window.catbox.criticalError(
+          'Renderer Error',
+          ev.message + '\n' + (ev.filename || '') + ':' + (ev.lineno || '')
+        );
       }
     });
 
