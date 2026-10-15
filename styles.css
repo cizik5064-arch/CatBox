@@ -18,6 +18,11 @@ html, body {
   background: #000;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
   color: #fff;
+  /* TV overscan safe zone (~3.5–5% each side) */
+  --safe-t: 4.5vh;
+  --safe-b: 4.5vh;
+  --safe-l: 4.5vw;
+  --safe-r: 4.5vw;
 }
 
 .screen {
@@ -88,6 +93,8 @@ html, body {
   justify-content: center;
   text-align: center;
   gap: 1.8rem;
+  padding: var(--safe-t) var(--safe-r) var(--safe-b) var(--safe-l);
+  box-sizing: border-box;
 }
 
 .logo {
@@ -145,9 +152,12 @@ html, body {
 
 #video {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  top: var(--safe-t);
+  right: var(--safe-r);
+  bottom: var(--safe-b);
+  left: var(--safe-l);
+  width: auto;
+  height: auto;
   object-fit: contain;
   background: #000;
 }
@@ -172,6 +182,7 @@ html, body {
 .error-box {
   text-align: center;
   padding: 2.5rem 3.5rem;
+  margin: var(--safe-t) var(--safe-r) var(--safe-b) var(--safe-l);
   background: rgba(30, 30, 30, 0.9);
   border-radius: 16px;
   border: 1px solid rgba(255, 80, 80, 0.35);
@@ -191,14 +202,14 @@ html, body {
   color: #eee;
 }
 
-/* Channel list - slides from left */
+/* Channel list - slides from left (inside safe area) */
 .channel-list {
   position: absolute;
-  top: 0;
-  left: 0;
-  bottom: 0;
-  width: 340px;
-  transform: translateX(-100%);
+  top: var(--safe-t);
+  left: var(--safe-l);
+  bottom: var(--safe-b);
+  width: min(340px, 28vw);
+  transform: translateX(calc(-100% - var(--safe-l)));
   transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
   z-index: 30;
   pointer-events: none;
@@ -217,6 +228,7 @@ html, body {
   padding: 1.4rem 0;
   overflow-y: auto;
   scrollbar-width: none;
+  border-radius: 0 12px 12px 0;
 }
 
 .channel-list-inner::-webkit-scrollbar {
@@ -252,11 +264,11 @@ html, body {
   text-overflow: ellipsis;
 }
 
-/* Number input (top-right) */
+/* Number input (top-right, inside safe area) */
 .number-input {
   position: absolute;
-  top: 2.2rem;
-  right: 2.2rem;
+  top: calc(var(--safe-t) + 0.8rem);
+  right: calc(var(--safe-r) + 0.8rem);
   min-width: 110px;
   padding: 0.7rem 1.3rem;
   background: rgba(15, 20, 25, 0.78);
@@ -280,12 +292,13 @@ html, body {
   pointer-events: none;
 }
 
-/* Brief channel info */
+/* Brief channel info (bottom, inside safe area) */
 .channel-info {
   position: absolute;
-  bottom: 2.5rem;
+  bottom: calc(var(--safe-b) + 0.8rem);
   left: 50%;
   transform: translateX(-50%);
+  max-width: calc(100% - var(--safe-l) - var(--safe-r) - 2rem);
   padding: 0.7rem 1.6rem;
   background: rgba(10, 14, 18, 0.72);
   backdrop-filter: blur(10px);
