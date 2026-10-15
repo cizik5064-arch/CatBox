@@ -98,7 +98,7 @@ process.on('uncaughtException', (err) => {
 });
 
 process.on('unhandledRejection', (reason) => {
-  console.error('Unhandled Rejection:', reason);
+  console.error('Unhandled Rejection', reason);
   notifyCritical('Unhandled Rejection', String(reason));
 });
 
@@ -124,11 +124,56 @@ function loadChannels() {
 function getTargetDisplay() {
   const displays = screen.getAllDisplays();
   if (displays.length > 1) {
-    // Prefer non-primary
     const secondary = displays.find((d) => d.id !== screen.getPrimaryDisplay().id);
     return secondary || displays[0];
   }
   return displays[0];
+}
+
+// === Focus keep (secondary monitor / Windows steals focus) ===
+let isQuitting = false;
+let focusTimer = null;
+
+function forceFocus() {
+  if (!mainWindow || mainWindow.isDestroyed() || isQuitting) return;
+  try {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.moveTop();
+    mainWindow.focus();
+    if (mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.focus();
+    }
+  } catch (_) {}
+}
+
+function registerGlobalKeys() {
+  const { globalShortcut } = require('electron');
+  const send = (payload) => {
+    forceFocus();
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('global-key', payload);
+    }
+  };
+
+  const bindings = [
+    ['Up', { key: 'ArrowUp' }],
+    ['Down', { key: 'ArrowDown' }],
+    ['Escape', { key: 'Escape' }],
+    ['Return', { key: 'Enter' }],
+    ['Space', { key: ' ' }],
+  ];
+  for (let d = 0; d <= 9; d++) {
+    bindings.push([String(d), { key: String(d) }]);
+  }
+
+  for (const [accel, payload] of bindings) {
+    try {
+      globalShortcut.register(accel, () => send(payload));
+    } catch (e) {
+      console.warn('globalShortcut failed for', accel, e.message);
+    }
+  }
 }
 
 // === Create window ===
@@ -150,71 +195,109 @@ function createWindow() {
     frame: false,
     autoHideMenuBar: true,
     backgroundColor: '#000000',
+    skipTaskbar: false,
+    focusable: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false, // needed for some media
+      sandbox: false,
     },
   });
 
-  // Hide cursor by default (CSS will also do it)
+  mainWindow.on('blur', () => {
+    if (isQuitting) return;
+    clearTimeout(focusTimer);
+    focusTimer = setTimeout(() => forceFocus(), 80);
+  });
+
+  mainWindow.once('ready-to-show', () => {
+    forceFocus();
+  });
+
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.insertCSS(`
       * { cursor: none !important; }
       body.mouse-active * { cursor: default !important; }
     `);
+    forceFocus();
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
-  // Open DevTools only in dev
   if (process.argv.includes('--enable-logging')) {
-    mainWindow.webContents.openDevTools({ mode: 'detach' });
+    mainWindow.webContents.openDevTools({ mode: 'right' });
   }
 
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
 
-  // Send channels to renderer when ready
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.send('channels-loaded', channels);
   });
 }
 
-// === yt-dlp helper ===
-function getYtDlpUrl(link) {
+const ytdlpCache = new Map();
+const YTDLP_CACHE_MS = 5 * 60 * 1000;
+
+function runYtDlp(bin, args) {
   return new Promise((resolve, reject) => {
-    // Prefer yt-dlp, fallback to youtube-dl
-    const tryBin = (bin) => {
-      execFile(
-        bin,
-        ['-g', '-f', 'best[protocol^=m3u8]/best/best', '--no-warnings', '--no-check-certificates', link],
-        { timeout: 25000, maxBuffer: 1024 * 1024 },
-        (err, stdout, stderr) => {
-          if (err) {
-            if (bin === 'yt-dlp') {
-              tryBin('youtube-dl');
-            } else {
-              reject(new Error(stderr || err.message));
-            }
-            return;
-          }
-          const url = (stdout || '').trim().split('\n').filter(Boolean).pop();
-          if (url && (url.startsWith('http') || url.startsWith('https'))) {
-            resolve(url);
-          } else {
-            reject(new Error('yt-dlp returned empty URL'));
-          }
+    execFile(
+      bin,
+      args,
+      { timeout: 45000, maxBuffer: 2 * 1024 * 1024, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          const msg = (stderr || err.message || String(err)).trim();
+          reject(new Error(msg.slice(0, 400) || 'yt-dlp failed'));
+          return;
         }
-      );
-    };
-    tryBin('yt-dlp');
+        const url = (stdout || '')
+          .trim()
+          .split(/\r?\n/)
+          .map((l) => l.trim())
+          .filter((l) => l.startsWith('http'))
+          .pop();
+        if (url) resolve(url);
+        else reject(new Error('yt-dlp returned empty URL'));
+      }
+    );
   });
 }
 
-// === IPC ===
+async function getYtDlpUrl(link) {
+  const cached = ytdlpCache.get(link);
+  if (cached && Date.now() - cached.at < YTDLP_CACHE_MS) {
+    return cached.url;
+  }
+
+  const bins =
+    process.platform === 'win32'
+      ? ['yt-dlp.exe', 'yt-dlp', 'youtube-dl.exe', 'youtube-dl']
+      : ['yt-dlp', 'youtube-dl'];
+
+  const formatAttempts = [
+    ['-g', '-f', 'best[protocol^=m3u8]/best[ext=mp4]/best/best', '--no-warnings', '--no-check-certificates', '--no-playlist', link],
+    ['-g', '-f', 'b', '--no-warnings', '--no-check-certificates', '--no-playlist', link],
+    ['-g', '--no-warnings', '--no-check-certificates', '--no-playlist', link],
+  ];
+
+  let lastErr = null;
+  for (const bin of bins) {
+    for (const args of formatAttempts) {
+      try {
+        const url = await runYtDlp(bin, args);
+        ytdlpCache.set(link, { url, at: Date.now() });
+        return url;
+      } catch (e) {
+        lastErr = e;
+      }
+    }
+  }
+  throw lastErr || new Error('yt-dlp failed');
+}
+
 ipcMain.handle('get-channels', () => channels);
 
 ipcMain.handle('resolve-stream', async (event, channelId) => {
@@ -228,7 +311,6 @@ ipcMain.handle('resolve-stream', async (event, channelId) => {
     }
     return { url: ch.link, type: 'direct', name: ch.name, id: ch.id };
   } catch (e) {
-    // Not a critical error (bad link / geo / temporary) — just return error to UI
     return { error: e.message || 'Failed to resolve stream', name: ch.name, id: ch.id };
   }
 });
@@ -238,18 +320,38 @@ ipcMain.on('critical-error', (event, title, message) => {
 });
 
 ipcMain.on('quit-app', () => {
+  isQuitting = true;
+  try {
+    require('electron').globalShortcut.unregisterAll();
+  } catch (_) {}
   app.quit();
 });
 
-// === App lifecycle ===
+ipcMain.on('request-focus', () => {
+  forceFocus();
+});
+
 app.whenReady().then(() => {
   createWindow();
+  registerGlobalKeys();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    else forceFocus();
   });
 });
 
+app.on('will-quit', () => {
+  isQuitting = true;
+  try {
+    require('electron').globalShortcut.unregisterAll();
+  } catch (_) {}
+});
+
 app.on('window-all-closed', () => {
+  isQuitting = true;
+  try {
+    require('electron').globalShortcut.unregisterAll();
+  } catch (_) {}
   if (process.platform !== 'darwin') app.quit();
 });
