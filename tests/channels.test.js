@@ -8,6 +8,8 @@ const {
   appendDigit,
   resolveNumberBuffer,
   isHlsUrl,
+  safeParseChannelsJson,
+  MAX_DIGIT_BUFFER_LENGTH,
 } = require('../lib/channels');
 
 describe('parseChannels', () => {
@@ -168,6 +170,31 @@ describe('number input (appendDigit / resolveNumberBuffer)', () => {
     assert.equal(appendDigit('12', ' '), '12');
   });
 
+  it('appendDigit enforces MAX_DIGIT_BUFFER_LENGTH (4) digit cap', () => {
+    assert.equal(MAX_DIGIT_BUFFER_LENGTH, 4);
+
+    let buf = '';
+    for (const d of ['1', '2', '3', '4']) {
+      buf = appendDigit(buf, d);
+    }
+    assert.equal(buf, '1234');
+
+    // A 5th digit must be rejected — buffer stays exactly at 4 digits.
+    buf = appendDigit(buf, '5');
+    assert.equal(buf, '1234');
+    assert.equal(buf.length, 4);
+
+    // Further digits also keep being rejected.
+    buf = appendDigit(buf, '9');
+    assert.equal(buf, '1234');
+  });
+
+  it('appendDigit cap applies independently of digit values', () => {
+    let buf = appendDigit(appendDigit(appendDigit(appendDigit('', '9'), '9'), '9'), '9');
+    assert.equal(buf, '9999');
+    assert.equal(appendDigit(buf, '0'), '9999');
+  });
+
   it('resolveNumberBuffer finds channel', () => {
     assert.equal(resolveNumberBuffer(channels, '1'), 0);
     assert.equal(resolveNumberBuffer(channels, '12'), 1);
@@ -194,5 +221,58 @@ describe('isHlsUrl', () => {
     assert.equal(isHlsUrl('https://rutube.ru/video/abc'), false);
     assert.equal(isHlsUrl(''), false);
     assert.equal(isHlsUrl(null), false);
+  });
+});
+
+describe('safeParseChannelsJson (potocs.json hot-reload safety)', () => {
+  it('parses valid JSON into a sorted channel list', () => {
+    const text = JSON.stringify({
+      '2': { name: 'B', link: 'http://b' },
+      '1': { name: 'A', link: 'http://a' },
+    });
+    const list = safeParseChannelsJson(text);
+    assert.notEqual(list, null);
+    assert.deepEqual(list.map((c) => c.id), [1, 2]);
+  });
+
+  it('returns null (not throw, not empty array) for invalid JSON', () => {
+    // Simulates an editor mid-write: truncated/broken JSON.
+    const brokenSamples = [
+      '{ "1": { "name": "A", "link": "http://a"',   // truncated, unclosed
+      '{ "1": { "name": "A" "link": "http://a" } }', // missing comma
+      'not even json',
+      '',
+      '{ "1": { "name": "A", "link": "http://a", } }', // trailing comma
+    ];
+    for (const text of brokenSamples) {
+      let threw = false;
+      let result;
+      try {
+        result = safeParseChannelsJson(text);
+      } catch (_) {
+        threw = true;
+      }
+      assert.equal(threw, false, `safeParseChannelsJson must never throw for: ${JSON.stringify(text)}`);
+      assert.equal(result, null, `expected null for invalid JSON: ${JSON.stringify(text)}`);
+    }
+  });
+
+  it('null result is distinguishable from a legitimately empty channel list', () => {
+    // Valid JSON that just has no usable channels → real empty array, not null.
+    const emptyButValid = safeParseChannelsJson('{}');
+    assert.notEqual(emptyButValid, null);
+    assert.deepEqual(emptyButValid, []);
+
+    // Invalid JSON → null, meaning "ignore this reload, keep old channels".
+    const invalid = safeParseChannelsJson('{ broken');
+    assert.equal(invalid, null);
+  });
+
+  it('valid JSON with non-object root still returns an array, not null', () => {
+    // parseChannels() itself defends against these inputs; safeParseChannelsJson
+    // should pass that behavior through rather than treating them as a parse failure.
+    assert.deepEqual(safeParseChannelsJson('[]'), []);
+    assert.deepEqual(safeParseChannelsJson('42'), []);
+    assert.deepEqual(safeParseChannelsJson('"just a string"'), []);
   });
 });

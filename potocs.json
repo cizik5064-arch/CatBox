@@ -9,6 +9,10 @@
     "link": "https://rutube.ru/video/c37cd74192c6bc3d6cd6077c0c4fd686/?r=plwd",
     "source": "ytdlp"
   },
+  "8": {
+    "name": "Карусель",
+    "link": "https://zabava-htlive.cdn.ngenix.net/hls/CH_KARUSEL/variant.m3u8?profile=web_auto"
+  },
   "12": {
     "name": "Спас",
     "link": "https://tvspas.mediacdn.ru/cdn/spas/playlist.m3u8"

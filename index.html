@@ -19,7 +19,16 @@
 
   <!-- PLAYER SCREEN -->
   <div id="player-screen" class="screen">
+    <!-- Cached last frame of the channel being switched to, shown instead of
+         black while the fresh stream is loading -->
+    <img id="frame-cache" class="frame-cache hidden" alt="" />
     <video id="video" playsinline autoplay></video>
+    <canvas id="frame-capture-canvas" class="frame-capture-canvas"></canvas>
+
+    <!-- Loading spinner -->
+    <div id="loading-spinner" class="loading-spinner hidden">
+      <div class="spinner-ring"></div>
+    </div>
 
     <!-- Error overlay -->
     <div id="error-overlay" class="error-overlay hidden">

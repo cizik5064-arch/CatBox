@@ -4,7 +4,7 @@ const fs = require('fs');
 const { spawn, execFile } = require('child_process');
 const https = require('https');
 const http = require('http');
-const { parseChannels } = require('./lib/channels');
+const { safeParseChannelsJson } = require('./lib/channels');
 
 // === Load .env (no external dependency) ===
 function loadEnvFile() {
@@ -103,21 +103,33 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // === Load potocs.json ===
-function loadChannels() {
+// Returns the parsed channel array, or `null` if the file is missing/unreadable/
+// invalid JSON. `null` lets callers distinguish "couldn't parse right now"
+// (e.g. file mid-write during a hot-reload) from "legitimately zero channels".
+function loadChannelsSafe({ notifyOnError = true } = {}) {
   const jsonPath = path.join(__dirname, 'potocs.json');
   if (!fs.existsSync(jsonPath)) {
     console.error('potocs.json not found!');
-    notifyCritical('Startup Error', 'potocs.json not found next to main.js');
-    return [];
+    if (notifyOnError) notifyCritical('Startup Error', 'potocs.json not found next to main.js');
+    return null;
   }
-  try {
-    const raw = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
-    return parseChannels(raw);
-  } catch (e) {
-    console.error('Failed to parse potocs.json', e);
-    notifyCritical('Startup Error', 'Failed to parse potocs.json: ' + e.message);
-    return [];
+  const text = fs.readFileSync(jsonPath, 'utf8');
+  const result = safeParseChannelsJson(text);
+  if (result === null) {
+    // Parsing failed — most commonly because the file is being saved by an
+    // editor and we read it mid-write (half-written JSON). This is expected
+    // and transient: log it quietly, do NOT notify/crash, and let the
+    // caller keep using the last-known-good channel list.
+    console.warn('potocs.json parse failed (ignored, keeping previous channels)');
   }
+  return result;
+}
+
+// Startup load: a parse failure here is a real problem (no previous list to
+// fall back to), so it's worth the critical notification.
+function loadChannels() {
+  const result = loadChannelsSafe({ notifyOnError: true });
+  return result || [];
 }
 
 // === Choose display (prefer secondary) ===
@@ -131,8 +143,12 @@ function getTargetDisplay() {
 }
 
 // === Focus keep (secondary monitor / Windows steals focus) ===
+// Focus is only re-grabbed automatically right after launch/show, or when
+// explicitly requested (global hotkey press, renderer mousedown). If the
+// user deliberately alt-tabs / clicks another window, we must NOT yank
+// focus back — userSwitchedAway tracks that intent.
 let isQuitting = false;
-let focusTimer = null;
+let userSwitchedAway = false;
 
 function forceFocus() {
   if (!mainWindow || mainWindow.isDestroyed() || isQuitting) return;
@@ -144,13 +160,34 @@ function forceFocus() {
     if (mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
       mainWindow.webContents.focus();
     }
+    userSwitchedAway = false;
   } catch (_) {}
+}
+
+// Explicit focus request (hotkey pressed, user interacted with our window) —
+// always clears the "switched away" flag, since this IS the user telling us
+// they want to be back on CatBox.
+function requestFocusExplicit() {
+  userSwitchedAway = false;
+  forceFocus();
 }
 
 function registerGlobalKeys() {
   const { globalShortcut } = require('electron');
   const send = (payload) => {
-    forceFocus();
+    // globalShortcut fires for these keys system-wide, no matter which
+    // window the OS currently has focused — including the user's browser,
+    // editor, or any other app. We must NOT treat "a bound key was pressed
+    // somewhere" as "the user wants CatBox back": that was exactly the bug
+    // (Enter/Space pressed in another window was yanking focus to CatBox).
+    //
+    // Only forward the key / reclaim focus when CatBox is already the
+    // foreground window (isFocused()) — i.e. the key really was meant for
+    // us. If the user has switched away, we silently do nothing and let
+    // the keypress go to whatever app they're actually using.
+    if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused()) {
+      return;
+    }
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('global-key', payload);
     }
@@ -205,10 +242,17 @@ function createWindow() {
     },
   });
 
+  // We intentionally do NOT force focus back on 'blur'. If the window loses
+  // focus, it's because either (a) the OS/another app briefly stole it on
+  // startup — handled by the initial grabs below — or (b) the user
+  // deliberately switched to another window, which we must respect.
   mainWindow.on('blur', () => {
     if (isQuitting) return;
-    clearTimeout(focusTimer);
-    focusTimer = setTimeout(() => forceFocus(), 80);
+    userSwitchedAway = true;
+  });
+
+  mainWindow.on('focus', () => {
+    userSwitchedAway = false;
   });
 
   mainWindow.once('ready-to-show', () => {
@@ -220,13 +264,18 @@ function createWindow() {
       * { cursor: none !important; }
       body.mouse-active * { cursor: default !important; }
     `);
-    forceFocus();
+    // Initial focus grab right after load is fine (app just started, user
+    // hasn't switched away from anything yet). Repeated/periodic grabs are
+    // removed — see 'blur' handler above.
+    if (!userSwitchedAway) forceFocus();
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
 
   if (process.argv.includes('--enable-logging')) {
-    mainWindow.webContents.openDevTools({ mode: 'right' });
+    // mode: 'undocked' opens DevTools as a separate OS window instead of
+    // embedding/splitting it into the main (fullscreen, frameless) window.
+    mainWindow.webContents.openDevTools({ mode: 'undocked' });
   }
 
   mainWindow.on('closed', () => {
@@ -236,6 +285,55 @@ function createWindow() {
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.send('channels-loaded', channels);
   });
+}
+
+// === Hot-reload potocs.json on change ===
+// Debounced + resilient: editors often write in multiple steps (truncate,
+// then write), so a raw 'change' event can fire while the file is only
+// half-written. If parsing fails at that moment we simply skip the reload
+// and keep the previous (last-known-good) channel list — we do NOT clear
+// channels or show an error, and we log it so it's visible in the console.
+let potocsWatcher = null;
+let potocsDebounceTimer = null;
+const POTOCS_DEBOUNCE_MS = 300;
+
+function handlePotocsChange() {
+  clearTimeout(potocsDebounceTimer);
+  potocsDebounceTimer = setTimeout(() => {
+    const updated = loadChannelsSafe({ notifyOnError: false });
+    if (updated === null) {
+      // Parse/read failed — almost certainly a mid-write snapshot.
+      // Ignore this event entirely; nothing changes.
+      console.log('[potocs.json] change detected but file not yet valid JSON — ignoring this event');
+      return;
+    }
+    channels = updated;
+    console.log(`[potocs.json] reloaded — ${channels.length} channel(s)`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('channels-loaded', channels);
+    }
+  }, POTOCS_DEBOUNCE_MS);
+}
+
+function watchPotocs() {
+  const jsonPath = path.join(__dirname, 'potocs.json');
+  try {
+    if (potocsWatcher) {
+      potocsWatcher.close();
+      potocsWatcher = null;
+    }
+    potocsWatcher = fs.watch(jsonPath, { persistent: true }, (eventType) => {
+      if (eventType === 'change' || eventType === 'rename') {
+        handlePotocsChange();
+      }
+    });
+    potocsWatcher.on('error', (e) => {
+      console.warn('potocs.json watcher error (will keep running on next restart):', e.message);
+    });
+    console.log('[potocs.json] watching for changes:', jsonPath);
+  } catch (e) {
+    console.warn('Failed to watch potocs.json:', e.message);
+  }
 }
 
 const ytdlpCache = new Map();
@@ -300,18 +398,74 @@ async function getYtDlpUrl(link) {
 
 ipcMain.handle('get-channels', () => channels);
 
+// Each resolve-stream call runs fully independently — ipcMain.handle already
+// dispatches each invocation as its own Promise, so N concurrent channel
+// switches naturally resolve/timeout/fail in parallel without blocking one
+// another. We additionally cap yt-dlp/network resolution with a per-call
+// timeout so a single stuck channel can never hang up a future switch.
+const RESOLVE_TIMEOUT_MS = 12000;
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 ipcMain.handle('resolve-stream', async (event, channelId) => {
   const ch = channels.find((c) => c.id === channelId);
   if (!ch) return { error: 'Channel not found' };
 
   try {
     if (ch.source === 'ytdlp') {
-      const directUrl = await getYtDlpUrl(ch.link);
+      const directUrl = await withTimeout(getYtDlpUrl(ch.link), RESOLVE_TIMEOUT_MS, 'yt-dlp');
       return { url: directUrl, type: 'direct', name: ch.name, id: ch.id };
     }
     return { url: ch.link, type: 'direct', name: ch.name, id: ch.id };
   } catch (e) {
     return { error: e.message || 'Failed to resolve stream', name: ch.name, id: ch.id };
+  }
+});
+
+// === Persistent last-frame cache (per channel) ===
+// Stored as JPEG files under userData/frame-cache/, keyed by channel id, so
+// the cache survives app restarts. The renderer grabs a frame via <canvas>
+// and sends us the dataURL; we write it to disk. On channel switch, the
+// renderer asks for the cached frame to show instead of a black screen while
+// the new stream is loading.
+function frameCacheDir() {
+  const dir = path.join(app.getPath('userData'), 'frame-cache');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (_) {}
+  return dir;
+}
+
+function frameCachePath(channelId) {
+  return path.join(frameCacheDir(), `ch-${channelId}.jpg`);
+}
+
+ipcMain.handle('save-channel-frame', async (event, channelId, dataUrl) => {
+  try {
+    const match = /^data:image\/jpeg;base64,(.+)$/.exec(dataUrl || '');
+    if (!match) return { ok: false };
+    const buf = Buffer.from(match[1], 'base64');
+    fs.writeFileSync(frameCachePath(channelId), buf);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('get-channel-frame', async (event, channelId) => {
+  try {
+    const p = frameCachePath(channelId);
+    if (!fs.existsSync(p)) return { ok: false };
+    const buf = fs.readFileSync(p);
+    return { ok: true, dataUrl: `data:image/jpeg;base64,${buf.toString('base64')}` };
+  } catch (e) {
+    return { ok: false, error: e.message };
   }
 });
 
@@ -328,16 +482,20 @@ ipcMain.on('quit-app', () => {
 });
 
 ipcMain.on('request-focus', () => {
-  forceFocus();
+  // Renderer only calls this on an actual keydown/mousedown inside our own
+  // window, i.e. the user is interacting with CatBox right now — legit to
+  // reclaim focus (e.g. after a transient OS focus hiccup).
+  requestFocusExplicit();
 });
 
 app.whenReady().then(() => {
   createWindow();
   registerGlobalKeys();
+  watchPotocs();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    else forceFocus();
+    else requestFocusExplicit();
   });
 });
 

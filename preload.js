@@ -12,4 +12,6 @@ contextBridge.exposeInMainWorld('catbox', {
   criticalError: (title, message) => ipcRenderer.send('critical-error', title, message),
   quit: () => ipcRenderer.send('quit-app'),
   requestFocus: () => ipcRenderer.send('request-focus'),
+  saveChannelFrame: (channelId, dataUrl) => ipcRenderer.invoke('save-channel-frame', channelId, dataUrl),
+  getChannelFrame: (channelId) => ipcRenderer.invoke('get-channel-frame', channelId),
 });

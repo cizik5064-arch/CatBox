@@ -1,6 +1,6 @@
 {
   "name": "catbox",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "CatBox IPTV set-top box by dontart",
   "main": "main.js",
   "scripts": {

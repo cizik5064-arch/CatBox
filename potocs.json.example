@@ -1,0 +1,12 @@
+{
+  "1": {
+    "name": "Example",
+    "description": "Example",
+    "link": "https://example.com/stream1.m3u8"
+  },
+  "4": {
+    "name": "Example",
+    "link": "https://rutube.ru/video/example",
+    "source": "ytdlp"
+	}
+}
